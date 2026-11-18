@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.vis.graphy</groupId>
+    <artifactId>research-formats-backend</artifactId>
+    <version>0.1.0</version>
+    <packaging>jar</packaging>
+
+    <properties>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- GRAPHY-Next の Release に添付されている graphy-plugin-api-<ver>.jar の版。CI は -Dgraphy.version=… で上書きする。
+             この JAR は GraphyPlugin SPI だけを使う（JDK の型だけ。本体の内部ライブラリには寄りかからない）。 -->
+        <graphy.version>0.6.3</graphy.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.vis.graphynext</groupId>
+            <artifactId>graphy-plugin-api</artifactId>
+            <version>${graphy.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.3</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>research-formats</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+                <configuration>
+                    <systemPropertyVariables>
+                        <!-- 手元にあれば実データでも確かめる（無ければその検査は飛ばす）。リポジトリには入れない -->
+                        <graphy.testdata>${env.GRAPHY_TESTDATA}</graphy.testdata>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

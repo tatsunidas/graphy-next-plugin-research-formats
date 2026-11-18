@@ -18,10 +18,8 @@
  * 本体の解析機能と並ぶ位置なので、**本体が区切り線と「（プラグイン）」の印を付ける**
  * — プラグイン側で名前に「プラグイン」と入れる必要はない（二重に出る）。
  *
- * <p>`viewer2d.xa3d` は **3D QCA のダイアログの中**にボタンとして出す（**H63・0.3.7 以降**）。
- * ダイアログは全画面の背景を持ちメニューを押せないので、「再構成を見ながら解析を掛ける」
- * （QFR など）にはこの面が要る。押してもダイアログは閉じない。host の中身は `viewer2d.menu` と同一。
- * 旧本体はこの面を知らないだけで、宣言しても害は無い（`contributes` で絞るだけ）。
+ * <p>`viewer2d.xa3d` は、本体の 3D QCA ダイアログ（H63・0.3.7 以降）の中に出す面だった。3D QCA はプラグインへ移ったので
+ * **本体はこの面をどこにも出さない**。宣言しても害は無い（読み込めるが現れない）。型は旧プラグインの宣言を読めるよう残している。
  */
 export type PluginSurface =
   | "viewer2d.menu"
@@ -414,6 +412,8 @@ export interface VesselSegment {
   diameterMm: (number | null)[];
   /** 近位側の区間 id。根なら null。 */
   parentId: string | null;
+  /** 表示名（"LAD" など。プラグインが決める。本体は解釈しない）。無ければ `id` を出す。 */
+  name?: string;
 }
 
 /** 空間校正の状態。近似には近似と書くために要る。**H11**。 */
@@ -427,8 +427,9 @@ export interface VesselCalibration {
   /**
    * 径の測り方。半値法と密度計測では絶対値が 10% 以上違い、断面積はその 2 乗で効く。
    * 2 方向で違えば "mixed"（断面積はどちらの意味でもない）。分からなければ null。
+   * CT（マスクの幾何）は "mask-equivalent-area"（直交断面の面積から等価径）か "mask-min-width"（断面の最小幅）。
    */
-  diameterMethod: "half-max" | "densitometric" | "mixed" | null;
+  diameterMethod: "half-max" | "densitometric" | "mask-equivalent-area" | "mask-min-width" | "mixed" | null;
 }
 
 /** この数字がどこから来たか。注記を書くための材料。**H11**。 */
@@ -469,7 +470,7 @@ export interface VesselOrientation {
  * 🔴 **本体は FFR を計算しない。** 流体解析・学習モデルはプラグインの担当で、
  * 本体はモデルを渡し、返ってきた値を色で見せるだけ。
  */
-export interface VesselModel {
+export interface XaVesselModel {
   /** セッション内の鍵。🔴 本体の URL（ポート）を含み、**起動し直すと変わる**。保存の鍵にしない。 */
   runId: string;
   /**
@@ -485,13 +486,47 @@ export interface VesselModel {
   segments: VesselSegment[];
   calibration: VesselCalibration;
   provenance: VesselProvenance;
+  /** このモデルを登録したプラグイン（`registerVesselModel`）。本体の 3D QCA が作ったモデルには無い。 */
+  producer?: { pluginId: string; pluginName: string; version: string };
   at: number;
 }
+
+/**
+ * CT 由来のモデルの出自（`kind: "ct-vessel"`）。どの画像のどのマスクから、どの解像度で作ったかを言えるだけの材料。
+ * 🔴 径はマスクの作り方（プラグイン）に依存し、**ボクセル間隔より細い血管の径は測れない**。本体は閾値を持たないので、
+ * `voxelSpacingMm` と `calibration.diameterMethod` を読み手が見ること。
+ */
+export interface CtVesselProvenance {
+  studyUid: string;
+  seriesUid: string;
+  /** 元ボリュームの FrameOfReferenceUID。無ければ null（同じ `seriesUid` の中だけで重ねられる）。 */
+  frameOfReferenceUid: string | null;
+  sopUids?: string[];
+  /** 元ボリュームの間隔 [mm]。正の有限値 3 つ。 */
+  voxelSpacingMm: [number, number, number];
+  /** 中心線・径の元になったマスクの出所。 */
+  maskOrigin: { type: "plugin" } | { type: "roi"; roiUids: string[] } | { type: "seg"; sopInstanceUid: string };
+  /** 多位相 CT の位相。 */
+  phase?: { c?: number; t?: number };
+}
+
+/** CT 由来の 3D 血管モデル（`kind: "ct-vessel"`）。`XaVesselModel` と同じ形で、`kind` と `provenance` だけが違う。 */
+export type CtVesselModel = Omit<XaVesselModel, "kind" | "provenance"> & {
+  kind: "ct-vessel";
+  provenance: CtVesselProvenance;
+};
+
+/**
+ * 登録簿の 3D 血管モデル（XA または CT）。`host.getVesselModel()` の戻り。**H11**。
+ * 🔴 **`kind` で見分けること。** `provenance` の形が違う（XA は角度・再投影誤差、CT は系列・間隔・マスクの出所）。
+ * `getVesselModel()`（`runId` 省略）は「最も新しいもの」なので、XA と CT が混ざると CT が返りうる。
+ */
+export type VesselModel = XaVesselModel | CtVesselModel;
 
 /** `host.listVesselModels()` の 1 件（点列を含まない要約）。**H11**。 */
 export interface VesselModelSummary {
   runId: string;
-  kind: "xa-qca3d" | "xa-bifurcation3d";
+  kind: "xa-qca3d" | "xa-bifurcation3d" | "ct-vessel";
   label: string;
   segmentCount: number;
   pointCount: number;
@@ -522,6 +557,20 @@ export interface VesselAnalysisInput {
   /** 提供元の免責文。**そのまま画面に出る**（本体は要約も書き換えもしない）。 */
   disclaimer?: string;
 }
+
+/** `host.registerVesselModel()` に渡すモデル。`runId` / `at` / 出自は host が決めるので含まない。 */
+export type VesselModelInput =
+  | (Omit<XaVesselModel, "runId" | "at" | "producer"> & {
+      /** 同じ鍵で登録し直すと置き換わる。1〜200 文字。 */
+      runKey: string;
+    })
+  | (Omit<CtVesselModel, "runId" | "at" | "producer"> & {
+      /** 同じ鍵で登録し直すと置き換わる。1〜200 文字。 */
+      runKey: string;
+    });
+
+/** `host.registerVesselModel()` の戻り。 */
+export type RegisterVesselModelResult = { ok: true; runId: string } | { ok: false; error: string };
 
 /** `host.putVesselAnalysis()` の戻り。 */
 export interface VesselAnalysisResult {
@@ -591,6 +640,88 @@ export interface XaCine {
   uniform: boolean;
 }
 
+/**
+ * XA の**投影幾何**。`host.getXaGeometry()` の戻り。**H41**。
+ *
+ * <p>2 方向のアンギオを対応付ける・3D に再構成するのに要る。座標系は患者 LPS（mm）。
+ * 角度は DICOM の `PositionerPrimaryAngle (0018,1510)` / `PositionerSecondaryAngle (0018,1511)` のまま（度）。
+ *
+ * <p>🔴 **読めないときは `geometry` が null で、理由が `missing` に入る。** 0 や既定値で埋めない。
+ * `imagerSpacingMm` は**検出器面**の値で、`SpatialCalibration` の校正済み mm/px とは別物
+ * （3D 再構成は校正値を使わない）。
+ *
+ * <p>⚠️ 主点は**画像中心と仮定**している（`FieldOfView*` による切り出しや装置側の回転・反転があるとずれる）。
+ * dataSet が**プリウォーム前**なら `missing` は `"noDataSet"`。シネを一度開けば温まる。
+ */
+export interface XaGeometry {
+  tileId: string;
+  imageId: string;
+  /** 読んだフレーム（0 origin）。 */
+  frameIndex: number;
+  geometry: XaViewGeometry | null;
+  missing: "noDataSet" | "noAngles" | "noDistances" | "noImagerSpacing" | "noImageSize" | null;
+  /** 角度がフレームごとに変わる収集（回転 DSA など）か。 */
+  perFrameAngles: boolean;
+}
+
+/** `host.readXaSeries()` の戻り。**H42**。 */
+export interface XaSeriesInfo {
+  seriesUid: string;
+  studyUid: string;
+  sopInstanceUid: string;
+  /** シリーズのインスタンス数。 */
+  instanceCount: number;
+  /**
+   * シリーズのショット（インスタンス）の一覧。2D ビューアの「ショット」と同じ並び（InstanceNumber → SOPInstanceUID）。
+   * `ref.sopInstanceUid` に入れて、別のショットを読める。古い本体は返さない（undefined）。
+   */
+  shots?: { sopInstanceUid: string; instanceNumber: number | null }[];
+  /** 読んだインスタンス（`sopInstanceUid`）のフレーム数。タグから読めなければ null（1 で埋めない）。 */
+  frameCount: number | null;
+  rows: number | null;
+  cols: number | null;
+  geometry: XaViewGeometry | null;
+  missing: "noDataSet" | "noAngles" | "noDistances" | "noImagerSpacing" | "noImageSize" | null;
+  perFrameAngles: boolean;
+  /**
+   * 撮影情報（fps の決め方は `getXaCine` と同じ）。読めなければ null。古い本体は返さない（undefined）。
+   * `fpsSource === "default"` は測定値ではない。
+   */
+  cine?: {
+    numberOfFrames: number;
+    fps: number;
+    fpsSource: "frameTimeVector" | "frameTime" | "cineRate" | "recommendedDisplayFrameRate" | "default";
+    frameStartTimesMs: number[];
+    uniform: boolean;
+  } | null;
+}
+
+/** `host.readXaSeriesFrame()` の戻り。**H42**。 */
+export interface XaSeriesFrame {
+  seriesUid: string;
+  frameIndex: number;
+  rows: number;
+  cols: number;
+  /** 校正済みの画素（行優先）。表示 W/L は掛かっていない。 */
+  data: Float32Array;
+  unit: string;
+}
+
+export interface XaViewGeometry {
+  /** 一次角 [度]（LAO/RAO）。 */
+  primaryAngleDeg: number;
+  /** 二次角 [度]（CRA/CAU）。 */
+  secondaryAngleDeg: number;
+  /** 線源〜検出器 [mm]。 */
+  sidMm: number;
+  /** 線源〜等中心 [mm]。 */
+  sodMm: number;
+  /** 検出器面のピクセル間隔 [行, 列] [mm]。 */
+  imagerSpacingMm: [number, number];
+  /** 主点 [x, y] [px]。 */
+  principalPoint: [number, number];
+}
+
 /** `getPixelData` の任意指定。**0.1.9 以降**。 */
 export interface PixelDataOptions {
   /**
@@ -627,6 +758,13 @@ export interface PixelData {
    * DICOM SliceThickness (0018,0050) mm。無ければ null（間隔で代用しない）。**0.1.12 以降**。
    */
   sliceThickness: number | null;
+  /**
+   * このスライスの患者座標の位置（ImagePositionPatient・LPS mm）。無ければ null。
+   * **タイルのスライス番号（`sliceIndex`）と、`loadVolume` が返すボリュームの z 添字は同じとは限らない**
+   * （ボリュームは位置の昇順、タイルは本体のレイアウト順。NM 多フレームのように位置が減る順だと完全な逆順）。
+   * 2 つを突き合わせるときは、この `ipp` と `loadVolume` の `ipp`・`sliceStep` から**位置で**対応づけること。
+   */
+  ipp: [number, number, number] | null;
 }
 
 /** `showOverlay` に渡す値マップ。**0.1.9 以降**。 */
@@ -668,6 +806,20 @@ export interface DerivedSeriesRequest {
    * CT のマスクなら空気の `-1000` が素直。指定した値は DICOM の `PixelPaddingValue` にも書かれる。
    */
   background?: number;
+  /**
+   * DiffusionBValue (0018,9087) として書く b 値（s/mm²、0 以上の有限値）。**省略すると書かない**。
+   * 元シリーズの b 値は引き継がない（派生画素の b 値を知っているのはプラグインだけ。例: computed DWI の目標 b 値）。
+   * **0.6.0 以降**。
+   */
+  diffusionBValue?: number;
+  /**
+   * 保存するシリーズの表示の窓（WindowCenter/Width）。**保存する値（`unit` 換算後の実際の量）での窓**を渡す
+   * （例: ADC を mm²/s で保存するなら 0.0015 / 0.003）。**省略すると窓は書かず**、ビューアが値域から決める。
+   * 窓は `VOILUTFunction = LINEAR_EXACT`（範囲 = 中心 ± 幅/2）として書かれる（DICOM 既定の LINEAR は幅 1 未満で上下が逆転するため）。
+   * 元シリーズの窓は引き継がない（元画像とは別の量なので、元の窓だと値域が合わず真っ黒になる）。
+   * `width` は 0 より大きい有限値、`center` も有限値であること。**この項目を含む版（0.6.0 の次）以降**。
+   */
+  window?: { center: number; width: number };
 }
 
 /** 保存結果。`cancelled` はユーザーが確認ダイアログで拒否した場合。**0.1.9 以降**。 */
@@ -766,6 +918,11 @@ export interface ViewerRoi {
 export interface PluginSeriesRef {
   seriesUid: string;
   studyUid?: string;
+  /**
+   * `readXaSeries` / `readXaSeriesFrame`（H42）だけが見る。読むインスタンス（XA の「ショット」）。省略は先頭のショット。
+   * 指した SOP がシリーズに無ければ null（先頭に替えない）。一覧は `readXaSeries` の `shots`。古い本体は無視する。
+   */
+  sopInstanceUid?: string;
   /** 多次元シリーズのチャンネル / 時相（既定 0）。 */
   c?: number;
   t?: number;
@@ -1123,6 +1280,121 @@ export interface PluginCurveFrame {
   arcLengthMm: number;
 }
 
+/** {@link Viewer2DPluginHost.openTransientSeries} の引数。**次の本体の版以降**。 */
+export interface PluginTransientSeriesSpec {
+  /** タイルの見出しに出す名前（本体が「[Plugin <名前>] <label>（未保存）」の形にする）。 */
+  label: string;
+  /** 幾何（スライス数・位置・向き）を借りるタイル。省略時は対象の先頭タイル。 */
+  referenceTileId?: string;
+  /**
+   * 表示するマップ（ADC・cDWI など）。**C 次元に並ぶ**（スライダーでマップを切り替える）。
+   * 全マップのスライス数は参照タイルのスタックと 1:1 で、`dims` は互いに等しいこと。
+   * `window` は必須（無いと元の画像の窓が当たって何も見えない）。
+   */
+  maps: Array<{
+    name: string;
+    volume: PluginValueVolume;
+    window: { center: number; width: number };
+    /** 本体の LUT 名（例 "Hot_Iron"）。省略/null はグレースケール。 */
+    colormap?: string | null;
+  }>;
+  /** 最初に出すマップ（C）。既定 0。 */
+  initialC?: number;
+  /** 最初に出すスライス（Z）。 */
+  initialZ?: number;
+  /** 画像の右側に値のスケールバーを出す。既定 true。 */
+  scaleBar?: boolean;
+}
+
+/** {@link Viewer2DPluginHost.openTransientSeries} の戻り。タイルを閉じる・見え方を変える・状態を聞く。**次の本体の版以降**。 */
+export interface PluginTransientSeriesHandle {
+  readonly tileId: string;
+  /** タイルが閉じたら true（× ・患者を閉じる・`close()` のどれでも）。 */
+  readonly closed: boolean;
+  /** マップ `c` の窓・カラーマップを変える。表示中のマップなら即反映する。 */
+  setMapDisplay(
+    c: number,
+    d: { window?: { center: number; width: number }; colormap?: string | null },
+  ): void;
+  /** 表示中の C・Z が変わったとき。戻り値は購読解除。 */
+  onDimChange(fn: (d: { c: number; z: number }) => void): () => void;
+  /** タイルが閉じたとき（1 度だけ）。 */
+  onClose(fn: () => void): void;
+  /** 一時タイルを閉じる。 */
+  close(): void;
+}
+
+/** {@link Viewer2DPluginHost.openCurvedMpr} の引数（H73）。 */
+export interface PluginCurvedMprSpec {
+  /** 開いているタイルのシリーズ。 */
+  source: PluginSeriesRef;
+  /** 制御点（患者 LPS mm、2 点以上、順序つき）。 */
+  centerline: [number, number, number][];
+  /** 省略した項目は窓の既定。`frameMode` だけは省略時 `ROTATION_MINIMIZING`。 */
+  options?: {
+    frameMode?: "FIXED_Z" | "ROTATION_MINIMIZING";
+    projection?: "CENTERLINE_ONLY" | "AVERAGE" | "MIP" | "MINIP";
+    bandHalfWidthMm?: number;
+    /** [min, max]（mm、min < max）。 */
+    secondAxisRangeMm?: [number, number];
+    arcStepMm?: number;
+  };
+  /** 窓の札に出す短い説明。出所のプラグイン名は host が必ず付ける。 */
+  title?: string;
+}
+
+export interface PluginCurvedMprResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** {@link Viewer2DPluginHost.openViewer3d} の引数（**次の本体の版以降**）。患者座標は LPS・mm。 */
+export interface PluginViewer3dSpec {
+  /** 開いているタイルのシリーズ（c/t 可）。一時シリーズ・連結タイルは不可。 */
+  source: PluginSeriesRef;
+  camera?: {
+    /** 視線方向（カメラ → 注視点）。長さは問わない（0・非有限は拒否）。 */
+    direction: [number, number, number];
+    /** 画面の上。視線に直交でなくてよい（本体が直交化して返す）。視線と平行なら拒否。画面右 = 視線 × 上。 */
+    up: [number, number, number];
+    /** 注視点。省略時は最初のクリップ面の原点、それも無ければボリューム中心。 */
+    focalPoint?: [number, number, number];
+    /** カメラから注視点までの距離（mm、> 0）。省略時は窓の今の距離。 */
+    distanceMm?: number;
+    /** 省略時は窓の現在値。 */
+    projection?: "perspective" | "parallel";
+    /** 平行投影のとき、画面の縦の半分に写る長さ（mm、> 0）。 */
+    parallelScaleMm?: number;
+  };
+  /** クリップ面。**法線の向く側を残す**。最大 6 枚。`[]` で全部消す。省略は変えない。 */
+  clipPlanes?: {
+    origin: [number, number, number];
+    normal: [number, number, number];
+    /** 右パネルの一覧に出す短い名前。 */
+    label?: string;
+  }[];
+  /** ORTHO・SLAB は視点の意味が変わるので受けない。省略は変えない。 */
+  mode?: "VR" | "MIP" | "MINIP";
+  /** VR のプリセット名（3D 窓の一覧にある名前）。省略は変えない。 */
+  preset?: string;
+  /** 札に出す短い説明。プラグイン名は host が必ず付ける。 */
+  title?: string;
+}
+
+export interface PluginViewer3dResult {
+  ok: boolean;
+  error?: string;
+  /** 本体が適用する値（正規化・直交化後）。検証の結果であり、描画の結果ではない。 */
+  applied?: {
+    direction: [number, number, number] | null;
+    up: [number, number, number] | null;
+    right: [number, number, number] | null;
+    /** 省略時は null（窓がクリップ面の原点かボリューム中心に決める）。 */
+    focalPoint: [number, number, number] | null;
+    clipPlanes: { origin: [number, number, number]; normal: [number, number, number]; label?: string }[];
+  };
+}
+
 export interface PluginCurveFrameOptions {
   /** フレームどうしの弧長間隔 mm。正の有限値。 */
   spacingMm: number;
@@ -1136,6 +1408,52 @@ export interface PluginCurveFrameOptions {
    */
   frameMode?: "FIXED_Z" | "ROTATION_MINIMIZING";
 }
+
+/** 断面計測（`measureMaskCrossSections`）のオプション。 */
+export interface CrossSectionOptions {
+  /** 断面どうしの弧長間隔 mm。正の有限値。 */
+  spacingMm: number;
+  /** 断面の走査半径 mm。正の有限値。**既定値は無い**。 */
+  maxRadiusMm: number;
+  /** 指定するとその値のセルだけを前景とする（1..255）。省略すると 0 以外すべて。 */
+  segment?: number;
+  /** 第 2 軸の規約。既定 `"ROTATION_MINIMIZING"`。 */
+  frameMode?: "FIXED_Z" | "ROTATION_MINIMIZING";
+  /** 断面格子の刻み mm。既定はマスクの最小ボクセル間隔の 1/2。 */
+  gridStepMm?: number;
+  /** この点列の近傍（半径 radiusMm 以内）の断面は測らない（全値 null）。分岐点の近傍を外すのに使う。 */
+  excludeNear?: { points: [number, number, number][]; radiusMm: number };
+}
+
+export interface CrossSectionFrame {
+  arcLengthMm: number;
+  positionWorld: [number, number, number];
+  /** 中心がマスクの外（真のとき計測値はすべて null）。 */
+  centerInMask: boolean;
+  /** 中心を含む成分が走査範囲の縁に触れた（真のとき計測値はすべて null）。 */
+  touchesBoundary: boolean;
+  /** `excludeNear` で外した（真のとき計測値はすべて null）。 */
+  excluded: boolean;
+  areaMm2: number | null;
+  /** 面積と同じ円の直径。`diameterMethod: "mask-equivalent-area"` に対応。 */
+  equivalentDiameterMm: number | null;
+  /** 全方位の最小幅。`diameterMethod: "mask-min-width"` に対応。 */
+  minWidthMm: number | null;
+}
+
+export type CrossSectionResult = { ok: true; frames: CrossSectionFrame[] } | { ok: false; error: string };
+
+export interface OrientedSegment {
+  /** `String(枝の id)`。 */
+  id: string;
+  /** 根 → 先の向き（患者 LPS mm）。 */
+  points: [number, number, number][];
+  /** 根の側でつながる区間の id。根の区間は null。 */
+  parentId: string | null;
+  lengthMm: number;
+}
+
+export type OrientResult = { ok: true; segments: OrientedSegment[] } | { ok: false; error: string };
 
 interface PluginHostBase {
   /** 自分の plugin.json の id。 */
@@ -1164,8 +1482,9 @@ interface PluginHostBase {
    *
    * <p>⚠ **患者の画素を第三者クラウドへ出す API である。** 使うには `plugin.json` の
    * `permissions` に `"ai-egress"` を宣言すること（未宣言なら `permission-denied` で弾かれる。
-   * これは実際に強制される数少ない権限のひとつ）。送信のたびに、**送る画像とプロンプト全文を
-   * 見せた同意ダイアログ**が本体側で出る。同意が効くのはセッション内・同一 `scopeKey` のみ。
+   * これは実際に強制される数少ない権限のひとつ）。送信前に、**宛先・指示・画像のサムネイルを
+   * 見せた確認ダイアログ**が本体（Electron main）から出る（宛先がローカルのときは出ない）。確認が効くのはセッション内・
+   * 同一 `scopeKey` のみ。確認と監査ログは本体の main が行うので、`host.ai` を経由せず直接呼んでも省けない。
    *
    * <p>例外は投げず `{ok:false, error}` で返る。`error:"canceled"` はユーザーが送信を
    * 取り消しただけなので、**エラーとして表示しないこと**。デスクトップ専用。
@@ -1224,6 +1543,22 @@ interface PluginHostBase {
      * 確保していなければ `{ok:true, released:false}`。次の `runJob` が自動で確保し直す。
      */
     releaseRuntime: (endpointId: string, opts?: { ask?: boolean }) => Promise<ComputeReleaseOutcome>;
+    /**
+     * 同じコードを入力の組ごとに走らせる（一括・**0.5.0 以降**）。**同意は全組で 1 回**——本体の窓が全組の行
+     * （種類・枚数・形式・大きさ・SHA-256）と合計、コードの全文を見せる。送れない組（焼き込み・格子など）は外れて
+     * `refused` に理由が出る（黙って減らさない）。組が終わるたびに `onItem` が届き、全部終わると返る。
+     * 1 組が落ちても残りは続く。計算機に届かなくなると一時停止し（残りは失敗にしない）`paused: true` で返る
+     * （続きは利用者が計算ジョブの窓で［再開］を押す）。実行は本体の台帳が持つので、画面を閉じても計算は続く。
+     * 例外は投げない。デスクトップ専用。
+     */
+    runBatch: (opts: ComputeRunBatchOptions, bopts?: ComputeBatchOptions) => Promise<ComputeBatchOutcome>;
+    /** 自分のプラグインの計算ジョブの一覧（患者名は含まない）。 */
+    listJobs: (opts?: { batchId?: string; uncollectedOnly?: boolean }) => Promise<ComputeJobSummary[]>;
+    /**
+     * 画面を閉じている間に終わった組のうち、受け取っていないものを `onItem` で届ける。届いた組は
+     * `item.markCollected()` で受け取り済みにする（計算ジョブの窓に「受け取り済み」と出る）。
+     */
+    attach: (batchId: string, bopts?: ComputeBatchOptions) => Promise<ComputeBatchOutcome>;
   };
   /**
    * **保管庫の画像を手元に確保する**（H67・**0.5.0 以降**）。Drive が正本のモード（手元は上限つきのキャッシュ）で、
@@ -1259,6 +1594,29 @@ interface PluginHostBase {
   microscopy: {
     importVolume: (req: PluginMicroscopyImportRequest, opts?: PluginJobOptions) => Promise<PluginMicroscopyImportOutcome>;
   };
+  /**
+   * NIfTI の受け渡し（H78・H79〔仮〕・**0.5.0 より後の版**）。研究用の画像形式（ECAT7・Interfile・AFNI・MINC・BIDS など）の読み書きは
+   * プラグインの JAR に置き、本体は NIfTI を「作る」「取り込む」口だけを開ける（幾何〔LPS↔RAS〕は本体の 2 か所に閉じ込める）。
+   * ファイルの受け渡しは一時フォルダ `<java.io.tmpdir>/graphy-plugin-nifti/<プラグイン ID>/` の下だけ。デスクトップ専用
+   * （web では `error: "desktop-only"`）。
+   */
+  nifti: {
+    /**
+     * H78: 1 シリーズを NIfTI-1（.nii.gz・float32・患者情報なし）にして、そのプラグインの一時フォルダへ置き、パスを返す。
+     * 匿名化の出力から作るので、本体の「NIfTI で書き出し」と同じ規則で断られることがある（`error` は理由コード:
+     * `volume-sheared`〔チルト〕・`nifti-uneven-phases`・`nifti-ambiguous-phases`・`nifti-mosaic` など）。
+     * 使い終わったら {@link release}（忘れた分は 2 時間後に本体が掃除する）。確認画面は出ない。
+     */
+    exportSeries: (req: PluginNiftiExportRequest) => Promise<PluginNiftiExportOutcome>;
+    /** H78: {@link exportSeries} で渡したファイル（そのプラグインの一時フォルダの下だけ）を消す。 */
+    release: (path: string) => Promise<{ ok: boolean; error?: string }>;
+    /**
+     * H79: プラグインの JAR が作った NIfTI を、本体が DICOM にして取り込む。**毎回、本体が確認画面を出す**（消せない。
+     * 向きが NIfTI に無く本体が合成するときは、その警告も出る）。`path`・`sidecar` はそのプラグインの一時フォルダの下の
+     * ファイルだけ（本体が確かめ、取り込んだら消す）。やめたときは `cancelled`。
+     */
+    importVolume: (req: PluginNiftiImportRequest, opts?: PluginJobOptions) => Promise<PluginNiftiImportOutcome>;
+  };
   /** 本体の DB（H44・H46・H51・**0.3.0 以降**）。 */
   db: {
     /** 患者を ID・氏名の部分一致で探す（H44）。**読み取りのみ**。空文字は全件。 */
@@ -1277,6 +1635,15 @@ interface PluginHostBase {
      * これを呼ぶのはプラグインが別の経路で DB を変えたときだけ。
      */
     notifyChanged: (detail?: { studyUids?: string[]; patientId?: string }) => void;
+    /**
+     * **保管庫のシリーズを、本体の窓で選んでもらう**（H72・**0.5.0 以降**）。検索・絞り込み（患者名・ID・検査日・種類）を
+     * して、スタディを展開してシリーズにチェックを入れる。返すのは**選んだ順の UID だけ**（`[{studyUid, seriesUid}]`）で、
+     * 患者名・記述は窓には出るがプラグインには渡らない。取り消し（Esc）は空配列。新しい権限・同意は要らない
+     * （外へ出すのは `compute.runBatch` の同意が別に聞く）。同時に出すのは 1 つで、2 件目以降は順番を待つ。
+     * `modalities`（`["CT"]` など）を渡すと、その種類のシリーズだけ選べる。例外は投げない。
+     * 結果はそのまま `compute.runBatch` の `items` に使える（組の名前 `key` には患者名を入れないこと）。
+     */
+    pickSeries: (opts?: PickSeriesOptions) => Promise<PickedSeries[]>;
   };
   /**
    * **動画の取り込み**（H47〜H49・**0.3.0 以降**）。standalone 専用。
@@ -1535,6 +1902,123 @@ export interface ComputeRunJobOptions {
   endpointId?: string;
   /** 秒。既定 3600・上限 6 時間。 */
   timeoutSec?: number;
+}
+
+/** `host.db.pickSeries()` の設定（H72）。 */
+export interface PickSeriesOptions {
+  /** 窓のタイトル（120 字まで）。 */
+  title?: string;
+  /** 選べるシリーズの種類（`["CT"]` など。英大文字）。窓の絞り込みの初期値になり、それ以外のシリーズは選べない。 */
+  modalities?: string[];
+  /** 複数選べるか。既定 true。 */
+  multiple?: boolean;
+}
+
+/** `host.db.pickSeries()` が返す 1 件。**UID だけ**（患者名・記述は渡さない）。 */
+export interface PickedSeries {
+  studyUid: string;
+  seriesUid: string;
+}
+
+/** `host.compute.runBatch()` の 1 組（同じコードを組ごとに走らせる）。 */
+export interface ComputeBatchItemInput {
+  /** 組の名前。英数字・`. _ -` の 64 字まで・重複不可。**患者名を入れないこと**（台帳・監査に残る）。 */
+  key: string;
+  /** 0〜8 件（1 組 = 計算機の上の 1 回の実行）。 */
+  inputs: ComputeJobInput[];
+}
+
+/** `host.compute.runBatch()` の引数。 */
+export interface ComputeRunBatchOptions {
+  /** 全組で同じコード（64KB まで）。 */
+  script: string;
+  items: ComputeBatchItemInput[];
+  /** `ComputeRunJobOptions.endpointId` と同じ。 */
+  endpointId?: string;
+  /** 1 組あたりの秒。既定 3600・上限 6 時間。 */
+  timeoutSec?: number;
+}
+
+/** 一括で送れずに外した組。 */
+export interface ComputeBatchRefused {
+  key: string;
+  /** 理由のコード（焼き込み・格子など。例 `series-not-found`）。 */
+  reason: string;
+}
+
+/** 一括の見守りの設定。 */
+export interface ComputeBatchOptions {
+  /** 組が終わるたびに呼ぶ（同じ組を 2 度は呼ばない）。 */
+  onItem?: (item: ComputeBatchItemOutcome) => void;
+  /** 終わった組の割合（0..1）と一言。 */
+  onProgress?: (fraction: number, message: string) => void;
+  /** 承認・投入が済んだ直後（`runBatch` のみ）。 */
+  onStarted?: (info: { batchId: string; items: { key: string; jobId: string }[]; refused: ComputeBatchRefused[] }) => void;
+  /** abort すると一括を中止する（待ちの組は計算機へ何も送らず、実行中の組は中断する）。 */
+  signal?: AbortSignal;
+  /** 台帳を読む間隔（ミリ秒）。既定 1000。 */
+  pollMs?: number;
+}
+
+/** 終わった 1 組の結果。`runJob` の結果と同じ形に、組の名前と受け取りの印が付く。 */
+export type ComputeBatchItemOutcome = {
+  key: string | null;
+  jobId: string;
+  /** 同じ組の試行の番号。利用者が計算ジョブの窓で［再実行］すると 2 以降が届く（同じ `key` のうち最大のものが最新）。 */
+  attempt: number;
+  markCollected: () => Promise<void>;
+} & (
+  | {
+      ok: true;
+      /** `error` は Python の例外（組としては走り終えている）。 */
+      status: "ok" | "error";
+      stdout: string;
+      stderr: string;
+      errorName?: string;
+      errorValue?: string;
+      traceback?: string[];
+      files: ComputeOutputFile[];
+      readFile: (name: string) => Promise<Uint8Array | null>;
+    }
+  | { ok: false; cancelled?: boolean; error: string }
+);
+
+export interface ComputeBatchCounts {
+  done: number;
+  failed: number;
+  cancelled: number;
+  interrupted: number;
+  total: number;
+}
+
+/** `runBatch` / `attach` の結果。 */
+export type ComputeBatchOutcome =
+  | {
+      ok: true;
+      batchId: string;
+      counts: ComputeBatchCounts;
+      refused: ComputeBatchRefused[];
+      /** 計算機に届かなくなって一時停止中。残りは待ちのまま（失敗にしていない）。 */
+      paused?: boolean;
+      reason?: string;
+      cancelled?: boolean;
+    }
+  | { ok: false; cancelled?: boolean; error: string; neededBytes?: number; freeBytes?: number; refused?: ComputeBatchRefused[] };
+
+/** `host.compute.listJobs()` の 1 行（患者名は含まない）。 */
+export interface ComputeJobSummary {
+  jobId: string;
+  batchId: string | null;
+  key: string | null;
+  /** 同じ組の試行の番号（再実行で 2 以降）。 */
+  attempt: number;
+  state: "QUEUED" | "RUNNING" | "AWAITING_USER" | "DONE" | "FAILED" | "CANCELLED" | "INTERRUPTED";
+  /** 失敗・中断の分類（`code-error` `timeout` `endpoint-unreachable` `dataset-changed` …）。 */
+  reason: string | null;
+  errorName: string | null;
+  errorValue: string | null;
+  outputsBytes: number | null;
+  collected: boolean;
 }
 
 /** `outputs/` のファイル。 */
@@ -1799,6 +2283,22 @@ export interface Viewer2DPluginHost extends PluginHostBase {
    */
   getXaCine: (tileId?: string) => XaCine | null;
   /**
+   * 対象タイルの **XA 投影幾何**（撮影角度・SID・SOD・検出器のピクセル間隔・主点）（**H41**）。
+   * XA / XRF でなければ null。読めないときは `geometry` が null で理由が `missing` に入る。
+   */
+  getXaGeometry: (tileId?: string) => XaGeometry | null;
+  /**
+   * **開いていない XA シリーズ**の幾何・フレーム数・画像サイズ（**H42**）。2 方向（A・B）を 1 つのプラグイン窓で
+   * 同時に扱うための口。読めない部分は null（理由は `missing`）。対象は `ref.sopInstanceUid` のインスタンスで、
+   * 省略すると**先頭のショット**。
+   */
+  readXaSeries: (ref: PluginSeriesRef) => Promise<XaSeriesInfo | null>;
+  /**
+   * **開いていない XA シリーズの 1 フレーム**の校正済み画素（**H42**）。`frameIndex` は 0 起点、範囲外は null。
+   * `loadVolume` は IPP の無い XA シネに使えないので、こちらを使う。
+   */
+  readXaSeriesFrame: (ref: PluginSeriesRef, frameIndex: number) => Promise<XaSeriesFrame | null>;
+  /**
    * **再構成済み 3D 血管モデルの一覧**（**H11**）。新しい順。まだ無ければ空配列。
    * 点列を含まない要約だけを返す（本体は `getVesselModel()` で取る）。
    */
@@ -1823,8 +2323,26 @@ export interface Viewer2DPluginHost extends PluginHostBase {
    *
    * 🔴 **壊れた入力はエラーになる**（未知の `segmentId`・範囲外の `index`・非有限の値・
    * 退化した `range`）。捨てて残りを採用すると**ずれたまま色が乗り**、誰も気付けない。
+   *
+   * **成功すると、本体の 3D 画面（`#geometry3d`）が開く**（開いていれば前面に出て、中身が差し替わる）。
+   * 木（分岐部の XA・CT 由来）は区間ごとに 1 物体で描かれ、色も `segmentId` で区間ごとに乗る（値の無い区間は「値なし」）。
    */
   putVesselAnalysis: (runId: string, result: VesselAnalysisInput) => VesselAnalysisResult;
+  /**
+   * **プラグインが作った 3D 血管モデルを登録する**（**H73**）。本体の 3D 表示と `listVesselModels` / `getVesselModel`
+   * が読む登録簿へ入る。同じ `runKey` は置き換える。セッション限り。`runId` / 登録時刻 / 出自は host が入れる。
+   * 🔴 壊れた入力は理由つきで拒否する。測れなかった点の径は `null`（0 で埋めない）。未校正
+   * （`calibration.diameterCalibrated: false`）なら**全点 null**でなければ拒否する。
+   * CT 由来のモデルは `kind: "ct-vessel"` と `CtVesselProvenance`（系列・FoR・元の間隔・マスクの出所）を渡す。
+   * `calibration.diameterMethod` に径の測り方（"mask-equivalent-area" / "mask-min-width"）を必ず書くこと。
+   */
+  registerVesselModel: (model: VesselModelInput) => RegisterVesselModelResult;
+  /**
+   * **登録した 3D 血管モデルの 3D 画面を開く**（H74。開いていれば前面に出て、中身が差し替わる）。`runId` は
+   * `registerVesselModel` の戻り。色は乗らない（`putVesselAnalysis` が成功したときに、同じ画面へ乗る）。
+   * 🔴 開けないときは理由つきで `ok: false`（モデルが無い・中心線が 2 点未満の区間がある）。木は区間ごとに描かれる。
+   */
+  openVesselModel3d: (runId: string) => { ok: true } | { ok: false; error: string };
   /**
    * 処理結果（値マップ）を**表示中スライスへ重ねて見せる**。`tileId` 省略時は対象の先頭タイル。
    * rows/cols が現在スライスと不一致なら false。**0.1.9 以降**。
@@ -1937,6 +2455,47 @@ export interface Viewer2DPluginHost extends PluginHostBase {
    */
   setRoiMeta: (roiUid: string, patch: Record<string, string>) => boolean;
   /**
+   * **ROI（楕円・矩形）を、表示中のスライスへ作る。**（次の版以降）`tileId` 省略時は対象タイルの先頭。
+   *
+   * <p>中心は、患者座標 LPS（mm）の `centerLps`、または表示中のスライスの画素座標 `[列, 行]` の `centerPx`
+   * （`getRois()` の `points` と同じ座標。2D の画素だけを扱うプラグイン用）の**どちらか一方**。LPS の中心は表示中の
+   * スライスの面内であること。面外は `off-slice` で拒否される（黙って別のスライスへ作らない）。成功すると、作った ROI の中心（LPS）も返る。半径（矩形は半幅）`radiiMm` は**表示の水平・垂直方向**の mm。
+   * 楕円・矩形は Cornerstone の定義で表示の軸に揃うため、回転・反転した表示でも、見えている向きの半径になる。
+   *
+   * <p>作った ROI には**本体が**出自の印（このプラグイン）とラベルを付けるので、ROI マネージャで見分けられる。
+   * 保存は本体が予約する。`removeCreatedRoi` で、**このプラグインが作った ROI だけ**を消せる
+   * （本体や他プラグインの ROI は消せない）。
+   *
+   * <p>**多角形・自由曲線も作れる**（`tool: "PolygonROI" | "FreehandROI"`）。頂点を `verticesLps`（LPS mm）か `verticesPx`（表示中スライスの画素座標）の
+   * **どちらか一方**で順に渡す（閉じるので始点を繰り返さない。多角形 3〜64 点、自由曲線 3〜256 点）。全頂点が表示中のスライスの面内であること。
+   * 自己交差・面積ゼロの形は `self-intersecting` / `degenerate` で拒否する。`radiiMm` / `centerLps` / `centerPx` は使わない。
+   * **長径・短径（RECIST の 2 軸）も作れる**（`tool: "Bidirectional"`）。`longAxisLps` と `shortAxisLps`（各軸の両端 2 点・LPS mm）、または
+   * `longAxisPx` と `shortAxisPx`（表示中スライスの画素座標）の**どちらか一方**で渡す。短径は長径に直交し、長径の線分と交わること（満たさない形は `bad-axes`）。
+   * 全点が表示中のスライスの面内であること。作った ROI は本体の長径・短径ツールで引いたものと同じ扱いで、端点を動かして直せる。
+   * **点 ROI も作れる**（`tool: "PointROI"`）。`centerLps` か `centerPx` の**どちらか一方**で 1 点だけ渡す（`radiiMm` は使わない。渡すと `bad-request`）。
+   * 本体の点 ROI ツールで置いたものと同じ扱いで、ドラッグで動かせる。`getRois()` では `points` が 1 点になる。
+   *
+   * <p>AI ツール（`effect: "write"`）の中から呼ぶ場合、その実行の前に本体が利用者の確認を出す。
+   * 失敗の理由: `bad-request`（ツール・数値が不正）／`off-slice`／`too-large`（半径が画像の大きさを超える）／
+   * `self-intersecting`／`degenerate`（多角形・自由曲線のみ）／`no-geometry`／`no-image`／`thick-slab`（ThickSlab 表示中は作れない）／`failed`。
+   */
+  createRoi: (
+    tileId: string | undefined,
+    req: {
+      tool: "EllipticalROI" | "RectangleROI" | "PolygonROI" | "FreehandROI" | "PointROI";
+      centerLps?: [number, number, number];
+      centerPx?: [number, number];
+      radiiMm?: [number, number];
+      verticesLps?: [number, number, number][];
+      verticesPx?: [number, number][];
+      label?: string;
+    },
+  ) => { ok: true; roiUid: string; centerLps: [number, number, number] } | { ok: false; reason: "bad-request" | "off-slice" | "no-geometry" | "too-large" | "no-image" | "thick-slab" | "self-intersecting" | "degenerate" | "bad-axes" | "failed" };
+  /** `createRoi` で**このプラグインが作った** ROI だけを消す（ロック中・他の ROI は消えず false）。（次の版以降） */
+  removeCreatedRoi: (roiUid: string) => boolean;
+  /** `showLabelVolume` で**このプラグインが出した** Mask（返った `segmentationId`）だけを消す（本体・他プラグイン・利用者の Mask、ロック中は消えず false）。 */
+  removeLabelVolume: (segmentationId: string) => boolean;
+  /**
    * ROI の追加・変更・削除を購読する。返り値を呼ぶと解除（ダイアログを閉じるときは必ず解除する）。
    * **何が変わったかは渡さない**ので、通知を受けたら `getRois()` を読み直すこと。
    */
@@ -2048,6 +2607,79 @@ export interface Viewer2DPluginHost extends PluginHostBase {
     polylineWorld: readonly [number, number, number][],
     opts: PluginCurveFrameOptions,
   ) => PluginCurveFrame[];
+  /**
+   * **中心線に直交する断面でマスクの内腔を測る**（H76・仮番号）。面積・等価径・最小幅を、弧長 `spacingMm` ごとに返す。
+   * 血管モデル（`registerVesselModel`）の `diameterMm` を作る素材。`diameterMethod` は等価径なら
+   * `"mask-equivalent-area"`、最小幅なら `"mask-min-width"`。
+   *
+   * <p>本体は**幾何だけ**を測る（マスクは 0/1。HU・造影濃度・石灰化・どの枝がどの血管かは解釈しない）。
+   * 返るフレームは弧長 0・間隔ごと・終点（最後だけ間隔が短い）。**`positionWorld` をそのまま区間の `points`、
+   * `equivalentDiameterMm` を `diameterMm` にすれば 1 点ごとの径になる**（H41 の疎な頂点に径を載せると、
+   * 頂点の間は補間されて径の分布が崩れる）。
+   * `maxRadiusMm` に既定値は無い。数えるのは**中心を含む 4 連結成分だけ**（隣の血管は混ざらない）。
+   *
+   * <p>🔴 **測れない断面は null**（0 や近くの別の構造の値で埋めない）: 中心がマスクの外・成分が走査半径の縁に触れた・
+   * `excludeNear` で外した。
+   *
+   * <p>🔴 **分岐点の近傍は信頼できない**（他枝の内腔が断面に入る。合成の Y 字〔幹 4.0・枝 3.0 mm〕で、節点をまたぐ経路の
+   * 節点付近は +0.5 mm 過大、または縁に触れて null になった。過大になる場合は自動では検出できない）→
+   * `excludeNear` に H41 の分岐節点（`degree >= 3`）を渡すこと。
+   *
+   * <p>精度（合成の直円柱での実測）: 等価径は真値の ±2% 程度（直径 2〜6 mm・ボクセル 0.25〜0.5 mm）、
+   * **最小幅は +0.1〜0.35 mm 大きく出る**。どちらもマスクの作り方に依存し、ボクセル間隔より細い血管は測れない。
+   * 狭窄の評価には等価径を使うこと。入力が壊れていれば `{ok:false, error}`。
+   */
+  measureMaskCrossSections: (
+    mask: PluginMaskInput,
+    polylineWorld: readonly [number, number, number][],
+    opts: CrossSectionOptions,
+  ) => CrossSectionResult;
+  /**
+   * **中心線グラフ（H41）を根から木に向き付ける**（H77・仮番号）。枝ごとに点列を根→先にそろえ、`parentId` を付ける。
+   * 出力の `segments` に `diameterMm` を足せばそのまま `registerVesselModel` の区間になる。
+   *
+   * <p>根は**端点（degree 1）の節点**。木でない（ループ・多重辺・非連結）・根が無い・根が端点でない場合は
+   * `{ok:false, error}`。どの端点が根（大動脈側など）かはプラグインが決める。
+   */
+  orientCenterlineGraph: (graph: PluginCenterlineGraph, rootNodeId: number) => OrientResult;
+  /**
+   * **中心線を渡して、本体の Curved MPR 窓を開く**（H73）。渡すのは制御点（患者 LPS mm・2 点以上）と
+   * 見え方のオプションだけで、再構成・表示・保存は本体が行う。窓には「プラグイン <名前> が指定した
+   * 中心線」の札が出る（出所は host が入れる）。窓が既に開いていれば、その窓の中心線が置き換わる。
+   *
+   * <p>🔴 戻り値は**検証と起動要求まで**（2 点未満・非有限・同一点・開いていないシリーズは `ok:false`
+   * で窓を開かない）。ボリュームの範囲外の点は戻り値では返せず、窓の警告として出る。
+   * `options.frameMode` の省略時は `ROTATION_MINIMIZING`（血管向け）。
+   */
+  openCurvedMpr: (spec: PluginCurvedMprSpec) => Promise<PluginCurvedMprResult>;
+  /**
+   * **視点とクリップ面を指定して、本体の 3D ビューアを開く**（**次の本体の版以降**）。渡すのは患者座標（LPS mm）の
+   * 視線・上・注視点とクリップ面だけで、描画・操作・計測は本体が行う。3D 窓には「プラグイン <名前> の視点: <title>」の札と
+   * ［指定に戻す］が出る（出所は host が入れる）。窓が既に開いていて同じシリーズなら、画面を読み直さず視点と札だけが変わる。
+   * 別のシリーズなら従来どおり読み直す。利用者はその後ドラッグで自由に回せる。
+   *
+   * <p>規約: **画面右 = 視線 × 上**（右手系）。`up` は本体が直交化して `applied.up` に返す（視線と平行なら拒否）。
+   * クリップ面は **法線の向く側を残す**（最大 6 枚）。`mode` は VR / MIP / MINIP。
+   *
+   * <p>🔴 戻り値は**検証と起動要求まで**（開いていない・一時・連結のシリーズ、視線 0、上が視線と平行、法線 0、
+   * 面が 7 枚以上、不正な `mode` などは `ok:false` で窓を開かない）。窓は非同期に開くので、描けたかどうかは分からない。
+   * シネマティック（パストレーサ）の表示中はクリップ面を表示できない（札に出る）。
+   */
+  openViewer3d: (spec: PluginViewer3dSpec) => Promise<PluginViewer3dResult>;
+  /**
+   * **プラグインが計算した値の画像を、2D ビューアの普通のタイルとして開く**（**次の本体の版以降**）。
+   * ADC・cDWI のような float のボリュームを、**マップを C 次元にして 1 枚のタイル**に出す。
+   * W/L・ズーム・プローブ・ROI・値の読み取りなど通常のシリーズビューの道具がそのまま効く。
+   *
+   * <p>🔴 **保管庫には保存されない一時シリーズ**（見出しに「（未保存）」）。その上の ROI も保存されない。
+   * 3D・MPR・Slicer などの単一シリーズ前提の操作は本体が止め、他のプラグインの `getTargets()` の
+   * 既定の対象にも入らない（`tileId` を明示すれば `getRois`・`getPixelData` で読める）。
+   * 一時タイルを参照にした保存系の host API は `transient-reference` で拒否される。
+   *
+   * <p>失敗は理由つきの例外（参照を解決できない・マップが無い・スライス数の不一致・窓が無い・
+   * マップ間で `dims` が違う）。出所（プラグイン名）は本体が入れる。
+   */
+  openTransientSeries: (spec: PluginTransientSeriesSpec) => Promise<PluginTransientSeriesHandle>;
   /**
    * **シリーズビューパネルをそのまま貸す**（H34・**0.2.1 以降**）。W/L バー・スライダ・
    * ThickSlab・参照線・計測・シネ、そして**フュージョン重畳**が丸ごと付いてくる。
@@ -2227,9 +2859,24 @@ export interface SrMeasurementGroup {
       // H66 の定量（fw/ct-quant-design.md §6）。meanValue・stdDev は unit 必須（HU / SUV を取り違えない）。meanValue は負も可
       | "area"
       | "meanValue"
-      | "stdDev";
+      | "stdDev"
+      // 汎用の種別。どの量かは `name` で書く。percent・ratio・score は `name` 必須。標準コードは確認できていないので私用スキーム
+      | "percent"
+      | "ratio"
+      | "score"
+      | "perimeter"
+      | "diameter"
+      | "distance"
+      | "angle";
     value: number;
     unit?: string;
+    /**
+     * 量の名前（例 "Ejection fraction"）。SR の NUM の修飾として書かれる。
+     * `percent`・`ratio`・`score` は必須（無いと何の値か決まらないので拒否される）。
+     * 既定の単位: percent `%` ／ ratio `1` ／ score `{score}` ／ perimeter・diameter・distance `mm` ／ angle `deg`。
+     * 負値は percent・distance だけ受ける。
+     */
+    name?: string;
   }[];
 }
 
@@ -2294,6 +2941,18 @@ export type PluginHost = Viewer2DPluginHost | MainScreenPluginHost;
  */
 export interface PluginModule {
   activate(host: PluginHost): void | Promise<void>;
+  /**
+   * AI アシスタントから呼ばれるツールの実装。`plugin.json` の `permissions` に `"ai-tools"`、`aiTools` に同名の宣言が要る
+   * （無いものは呼ばれない）。宣言の `effect` は `"read"`・`"display"`・`"write"`。`"write"`（データを変える）は**実行のたびに本体が
+   * 利用者の確認を出し**、拒否されると呼ばれない。2D 窓が呼び出し時にだけ読み込み、`activate` は呼ばない。
+   * 🔴 **宣言を超える `host` の呼び出しは止まる**: `"read"` は読み取りと計算、`"display"` はそれに表示・遷移まで。保存・ROI の作成や変更・
+   * 外部への送信など書き込み系のメンバに触れた時点で、ツールは `effect-violation` で失敗する（例外を握りつぶしても失敗になる）。
+   * 書き込みをするツールは `"write"` と宣言すること。
+   * 待ち時間は既定 30 秒。外部計算機のように時間のかかるツールは、宣言に整数 `timeoutSec`（5〜900）を書くと、その秒数まで待つ
+   * （範囲外はそのツールが無効になる。利用者の確認の経路は変わらない）。
+   * 戻り値は JSON にできる値（深さ 3・4 KB まで）。AI には信用できないデータとして渡る。
+   */
+  aiTools?: Record<string, (args: Record<string, unknown>, host: PluginHost) => unknown | Promise<unknown>>;
 }
 
 /** `host.file.saveJobArtifact()` の指定（H53）。 */
@@ -2425,3 +3084,56 @@ export interface PluginMicroscopyImported {
 export type PluginMicroscopyImportOutcome =
   | { ok: true; studyInstanceUid?: string; imported: PluginMicroscopyImported[] }
   | { ok: false; error?: string; cancelled?: boolean; studyInstanceUid?: string; imported: PluginMicroscopyImported[] };
+
+/** H78: 書き出す 1 シリーズ。 */
+export interface PluginNiftiExportRequest {
+  studyUid: string;
+  seriesUid: string;
+}
+
+export type PluginNiftiExportOutcome =
+  | {
+      ok: true;
+      /** 書き出した .nii.gz の絶対パス（そのプラグインの一時フォルダの下）。 */
+      path: string;
+      bytes: number;
+      /** 書き出したインスタンス数（4D は位置×時相）。 */
+      slices: number;
+      /** 時相の数（3D は 1）。 */
+      frames: number;
+      /** 時相の間隔（秒）。決まらないとき（不明・不均一）と 3D は null（推測の値は返さない）。 */
+      timeStepSec: number | null;
+    }
+  | { ok: false; error: string };
+
+/** H79: 取り込む NIfTI。 */
+export interface PluginNiftiImportRequest {
+  /** プラグインの一時フォルダの下の .nii / .nii.gz（.hdr/.img の対も可）。 */
+  path: string;
+  /** サイドカー JSON（任意。同じ一時フォルダの下）。 */
+  sidecar?: string;
+  /** 元のファイル名（確認画面に出る）。 */
+  sourceName?: string;
+  patient: { patientId: string; patientName?: string; birthDate?: string; sex?: string };
+  /** 既定は MR。 */
+  modality?: string;
+  studyDescription?: string;
+  seriesDescription?: string;
+  seriesNumber?: number;
+  /** 既存の検査に足すとき。 */
+  studyInstanceUid?: string;
+  /** 値の単位（UCUM のコード・16 文字以内。省略・"1" は単位なし）。 */
+  valueUnit?: string;
+}
+
+export type PluginNiftiImportOutcome =
+  | {
+      ok: true;
+      studyInstanceUid: string;
+      seriesInstanceUid: string;
+      slices: number;
+      phases: number;
+      /** 向きが NIfTI に無く、本体が合成した（患者座標の向きは保証されない）。 */
+      geometrySynthesized: boolean;
+    }
+  | { ok: false; error?: string; cancelled?: boolean };
