@@ -1,7 +1,7 @@
 {
   "id": "vis-research-formats",
   "name": "研究用画像形式の書き出し",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "contributes": ["mainscreen.menu"],
   "ui": "ui.js",
   "entrypoint": "com.vis.graphy.researchformats.ResearchFormatsPlugin",
@@ -10,7 +10,7 @@
     "graphy": ">=0.6.3",
     "os": ["win32", "darwin", "linux"]
   },
-  "description": "シリーズを研究用の画像形式で書き出す。現在は NIfTI の 2 ファイル形式（.hdr＋.img）。研究用で、診断には使えない。デスクトップ版のみ。",
+  "description": "シリーズを研究用の画像形式で書き出す。現在は NIfTI の 2 ファイル形式（.hdr＋.img）と BIDS データセット（MR の anat。ZIP）。研究用で、診断には使えない。デスクトップ版のみ。",
   "author": "Visionary Imaging Services, Inc.",
   "homepage": "https://github.com/tatsunidas/graphy-next-plugin-research-formats",
   "license": "MIT"
