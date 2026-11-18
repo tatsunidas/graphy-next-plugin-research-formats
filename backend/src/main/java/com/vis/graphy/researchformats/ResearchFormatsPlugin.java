@@ -52,6 +52,9 @@ public class ResearchFormatsPlugin implements GraphyPlugin {
                 ? (BiConsumer<Double, String>) p : (a, b) -> { };
         BooleanSupplier cancelled = args.get("__cancelled") instanceof BooleanSupplier c ? c : () -> false;
         String op = String.valueOf(args.getOrDefault("op", "convert"));
+        if ("bids".equals(op)) {
+            return bids(args, progress, cancelled);
+        }
         if (!"convert".equals(op)) {
             return Map.of("error", "unknown-op");
         }
@@ -97,6 +100,77 @@ public class ResearchFormatsPlugin implements GraphyPlugin {
             deleteTree(dir);
             throw e;
         }
+    }
+
+    /**
+     * {@code op=bids}: {@code items}（各 {@code {path, subject, session?, suffix}}）・{@code name}・{@code description} から BIDS の ZIP を作る。
+     * 入力は {@link #allowedInput} と同じ規則（本体が置いた一時フォルダの下の実在の {@code .nii.gz} だけ）。
+     */
+    private Object bids(Map<String, Object> args, BiConsumer<Double, String> progress, BooleanSupplier cancelled) throws Exception {
+        if (!(args.get("items") instanceof List<?> raw) || raw.isEmpty()) {
+            return Map.of("error", "bids-no-series");
+        }
+        if (raw.size() > BidsWriter.MAX_ENTRIES) {
+            return Map.of("error", "bids-too-many");
+        }
+        List<BidsWriter.Entry> entries = new ArrayList<>();
+        for (Object o : raw) {
+            if (!(o instanceof Map<?, ?> m)) {
+                return Map.of("error", "bids-bad-item");
+            }
+            Path in = allowedInput(m.get("path"));
+            if (in == null) {
+                return Map.of("error", "bad-input-path");
+            }
+            Integer subject = wholeNumber(m.get("subject"));
+            if (subject == null) {
+                return Map.of("error", "bids-bad-subject");
+            }
+            Integer session = null;
+            if (m.get("session") != null) {
+                session = wholeNumber(m.get("session"));
+                if (session == null) {
+                    return Map.of("error", "bids-bad-session");
+                }
+            }
+            entries.add(new BidsWriter.Entry(in, subject, session, String.valueOf(m.get("suffix"))));
+        }
+        String name = args.get("name") instanceof String s ? s : null;
+        String description = args.get("description") instanceof String s ? s : "";
+        sweepStale();
+        Path dir = tmpRoot.resolve(OUT_DIR).resolve(UUID.randomUUID().toString());
+        Files.createDirectories(dir);
+        String stem = name == null ? "dataset" : BidsWriter.safeFileStem(name);
+        Path out = dir.resolve("bids-" + stem + ".zip");
+        try {
+            BidsWriter.Result r = BidsWriter.write(out, entries, name, description,
+                    p -> progress.accept(p, "データセットを作っています…"), cancelled);
+            if (r == null) {
+                deleteTree(dir);
+                return Map.of("cancelled", true);
+            }
+            Map<String, Object> res = new LinkedHashMap<>();
+            res.put("__artifact", out.toString());
+            res.put("__artifactName", out.getFileName().toString());
+            res.put("bytes", Files.size(out));
+            res.put("files", r.files());
+            res.put("subjects", r.subjects());
+            return res;
+        } catch (NiftiPairWriter.Refused e) {
+            deleteTree(dir);
+            return Map.of("error", e.code(), "detail", e.getMessage());
+        } catch (IOException | RuntimeException e) {
+            deleteTree(dir);
+            throw e;
+        }
+    }
+
+    /** JSON の数（整数・実数）を、小数部の無い整数のときだけ int にする。 */
+    private static Integer wholeNumber(Object o) {
+        if (o instanceof Number n && n.doubleValue() == Math.rint(n.doubleValue()) && Math.abs(n.doubleValue()) < 1e9) {
+            return n.intValue();
+        }
+        return null;
     }
 
     /**

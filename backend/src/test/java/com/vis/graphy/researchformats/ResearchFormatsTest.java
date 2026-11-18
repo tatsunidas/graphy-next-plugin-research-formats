@@ -43,51 +43,8 @@ class ResearchFormatsTest {
         plugin = new ResearchFormatsPlugin(tmp);
     }
 
-    /** 本体の書き手と同じ並びの NIfTI-1（n+1・vox_offset 352・拡張なし・float32・LE）を組む。 */
-    private static byte[] nifti(int[] dim, float[] data, int datatype, int bitpix, float voxOffset, boolean ext) {
-        int dims = dim.length;
-        ByteBuffer b = ByteBuffer.allocate(352 + data.length * 4).order(ByteOrder.LITTLE_ENDIAN);
-        b.putInt(0, 348);
-        b.putShort(40, (short) dims);
-        for (int i = 0; i < dims; i++) {
-            b.putShort(42 + 2 * i, (short) dim[i]);
-        }
-        for (int i = dims; i < 7; i++) {
-            b.putShort(42 + 2 * i, (short) 1);
-        }
-        b.putShort(70, (short) datatype);
-        b.putShort(72, (short) bitpix);
-        b.putFloat(76, -1f);                    // pixdim[0] = qfac
-        b.putFloat(80, 0.8f).putFloat(84, 0.6f).putFloat(88, 2.5f);
-        b.putFloat(108, voxOffset);
-        b.putShort(254, (short) 1);              // sform_code
-        b.putFloat(280, -0.8f).putFloat(300, -0.6f).putFloat(320, 2.5f); // srow の対角（テスト用の目印）
-        b.putFloat(284, 12.25f);                 // srow_x[3]
-        b.put(344, (byte) 'n').put(345, (byte) '+').put(346, (byte) '1').put(347, (byte) 0);
-        if (ext) {
-            b.put(348, (byte) 1);
-        }
-        for (int i = 0; i < data.length; i++) {
-            b.putFloat(352 + 4 * i, data[i]);
-        }
-        return b.array();
-    }
-
-    private static float[] ramp(int n) {
-        float[] d = new float[n];
-        for (int i = 0; i < n; i++) {
-            d[i] = i * 0.5f - 7f;
-        }
-        d[n / 2] = Float.NaN;
-        return d;
-    }
-
     private Path gz(String name, byte[] raw) throws IOException {
-        Path p = inDir.resolve(name);
-        try (OutputStream os = new GZIPOutputStream(Files.newOutputStream(p))) {
-            os.write(raw);
-        }
-        return p;
+        return NiftiFixtures.gz(inDir, name, raw);
     }
 
     @SuppressWarnings("unchecked")
@@ -103,8 +60,8 @@ class ResearchFormatsTest {
 
     @Test
     void three_d_pair_has_ni1_header_zero_offset_and_bit_identical_pixels() throws Exception {
-        float[] data = ramp(5 * 4 * 3);
-        byte[] raw = nifti(new int[]{5, 4, 3}, data, 16, 32, 352f, false);
+        float[] data = NiftiFixtures.ramp(5 * 4 * 3);
+        byte[] raw = NiftiFixtures.nifti(new int[]{5, 4, 3}, data, 16, 32, 352f, false);
         Path in = gz("a.nii.gz", raw);
 
         Path hdr = artifact(run(in, "hdr"));
@@ -136,8 +93,8 @@ class ResearchFormatsTest {
 
     @Test
     void four_d_pair_keeps_dim_and_reports_frames() throws Exception {
-        float[] data = ramp(3 * 2 * 2 * 4);
-        Path in = gz("d.nii.gz", nifti(new int[]{3, 2, 2, 4}, data, 16, 32, 352f, false));
+        float[] data = NiftiFixtures.ramp(3 * 2 * 2 * 4);
+        Path in = gz("d.nii.gz", NiftiFixtures.nifti(new int[]{3, 2, 2, 4}, data, 16, 32, 352f, false));
         Map<String, Object> r = run(in, "img");
         assertEquals(4, r.get("frames"));
         assertEquals(List.of(3, 2, 2, 4), r.get("dim"));
@@ -147,25 +104,25 @@ class ResearchFormatsTest {
 
     @Test
     void refusals_write_nothing_and_each_positive_counterpart_passes() throws Exception {
-        float[] d = ramp(2 * 2 * 2);
-        Path ok = gz("ok.nii.gz", nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, false));
+        float[] d = NiftiFixtures.ramp(2 * 2 * 2);
+        Path ok = gz("ok.nii.gz", NiftiFixtures.nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, false));
         assertNotNull(run(ok, "img").get("__artifact"), "正例（同じ形）は通る");
 
         // NIfTI-2 の sizeof_hdr
-        byte[] n2 = nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, false);
+        byte[] n2 = NiftiFixtures.nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, false);
         ByteBuffer.wrap(n2).order(ByteOrder.LITTLE_ENDIAN).putInt(0, 540);
         // 既に 2 ファイル形式の magic
-        byte[] ni1 = nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, false);
+        byte[] ni1 = NiftiFixtures.nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, false);
         ni1[345] = 'i';
         // 拡張つき・vox_offset が 352 でない
-        byte[] withExt = nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, true);
-        byte[] offset = nifti(new int[]{2, 2, 2}, d, 16, 32, 400f, false);
+        byte[] withExt = NiftiFixtures.nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, true);
+        byte[] offset = NiftiFixtures.nifti(new int[]{2, 2, 2}, d, 16, 32, 400f, false);
         // int16・5 次元・0 のサイズ
-        byte[] i16 = nifti(new int[]{2, 2, 2}, d, 4, 16, 352f, false);
-        byte[] five = nifti(new int[]{2, 2, 2, 1, 1}, d, 16, 32, 352f, false);
-        byte[] zero = nifti(new int[]{2, 0, 2}, d, 16, 32, 352f, false);
+        byte[] i16 = NiftiFixtures.nifti(new int[]{2, 2, 2}, d, 4, 16, 352f, false);
+        byte[] five = NiftiFixtures.nifti(new int[]{2, 2, 2, 1, 1}, d, 16, 32, 352f, false);
+        byte[] zero = NiftiFixtures.nifti(new int[]{2, 0, 2}, d, 16, 32, 352f, false);
         // ビッグエンディアン（sizeof_hdr のバイト列が逆）
-        byte[] be = nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, false);
+        byte[] be = NiftiFixtures.nifti(new int[]{2, 2, 2}, d, 16, 32, 352f, false);
         ByteBuffer.wrap(be).order(ByteOrder.BIG_ENDIAN).putInt(0, 348);
 
         Map<String, byte[]> bad = new java.util.LinkedHashMap<>();
@@ -190,8 +147,8 @@ class ResearchFormatsTest {
 
     @Test
     void truncated_trailing_and_broken_gzip_are_refused_and_leave_no_partial_file() throws Exception {
-        float[] d = ramp(4 * 4 * 4);
-        byte[] good = nifti(new int[]{4, 4, 4}, d, 16, 32, 352f, false);
+        float[] d = NiftiFixtures.ramp(4 * 4 * 4);
+        byte[] good = NiftiFixtures.nifti(new int[]{4, 4, 4}, d, 16, 32, 352f, false);
         assertNotNull(run(gz("good.nii.gz", good), "img").get("__artifact"));
 
         byte[] cut = java.util.Arrays.copyOf(good, good.length - 8);
@@ -217,7 +174,7 @@ class ResearchFormatsTest {
     @Test
     void huge_dim_is_refused_before_copying_anything() throws Exception {
         // 32767^3 × 4 バイトの宣言（実データは数バイト）。巨大な出力・確保をしない
-        byte[] raw = nifti(new int[]{32767, 32767, 32767}, new float[1], 16, 32, 352f, false);
+        byte[] raw = NiftiFixtures.nifti(new int[]{32767, 32767, 32767}, new float[1], 16, 32, 352f, false);
         long t0 = System.nanoTime();
         assertEquals("too-large", run(gz("huge.nii.gz", raw), "img").get("error"));
         assertEquals("too-large", run(gz("huge.nii.gz", raw), "hdr").get("error"));
@@ -227,7 +184,7 @@ class ResearchFormatsTest {
 
     @Test
     void input_outside_the_allowed_folder_or_not_a_regular_nii_gz_is_refused() throws Exception {
-        byte[] raw = nifti(new int[]{2, 2, 2}, ramp(8), 16, 32, 352f, false);
+        byte[] raw = NiftiFixtures.nifti(new int[]{2, 2, 2}, NiftiFixtures.ramp(8), 16, 32, 352f, false);
         // 正例: 許可フォルダの下は通る
         assertNotNull(run(gz("in.nii.gz", raw), "hdr").get("__artifact"));
         // 負例 1: 一時フォルダの下でも、許可フォルダの外
@@ -255,7 +212,7 @@ class ResearchFormatsTest {
 
     @Test
     void unknown_op_and_part_and_cancel() throws Exception {
-        byte[] raw = nifti(new int[]{8, 8, 8}, ramp(512), 16, 32, 352f, false);
+        byte[] raw = NiftiFixtures.nifti(new int[]{8, 8, 8}, NiftiFixtures.ramp(512), 16, 32, 352f, false);
         Path in = gz("c.nii.gz", raw);
         assertEquals("unknown-op", ((Map<?, ?>) plugin.run(Map.of("op", "nope"))).get("error"));
         assertEquals("bad-part", run(in, "zip").get("error"));
@@ -275,7 +232,7 @@ class ResearchFormatsTest {
         ByteArrayOutputStream raw = new ByteArrayOutputStream();
         int[] dim = {256, 256, 300};
         long voxels = 256L * 256 * 300;
-        ByteBuffer head = ByteBuffer.wrap(nifti(dim, new float[0], 16, 32, 352f, false)).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer head = ByteBuffer.wrap(NiftiFixtures.nifti(dim, new float[0], 16, 32, 352f, false)).order(ByteOrder.LITTLE_ENDIAN);
         raw.write(head.array(), 0, 352);
         byte[] chunk = new byte[1 << 20];
         long left = voxels * 4;
